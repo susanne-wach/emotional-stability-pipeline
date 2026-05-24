@@ -1,0 +1,47 @@
+name: Emotional Stability — Submissions verarbeiten
+
+# Läuft alle 15 Min als Backup + sofort manuell triggerbar (auch via API von Netlify)
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: process
+  cancel-in-progress: false
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Repo auschecken
+        uses: actions/checkout@v4
+
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: LibreOffice für DOCX→PDF
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libreoffice fonts-liberation
+          soffice --version
+
+      - name: Python-Dependencies
+        run: pip install --quiet anthropic python-docx
+
+      - name: Pipeline ausführen
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USE_SSL: ${{ secrets.SMTP_USE_SSL }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          REPLY_TO: ${{ secrets.REPLY_TO }}
+        run: python3 src/process_submission.py

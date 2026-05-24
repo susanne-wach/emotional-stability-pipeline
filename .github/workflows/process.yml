@@ -44,4 +44,7 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           REPLY_TO: ${{ secrets.REPLY_TO }}
+          AC_API_URL: ${{ secrets.AC_API_URL }}
+          AC_API_KEY: ${{ secrets.AC_API_KEY }}
+          AC_TAG_TEST_ABGEGEBEN: ${{ secrets.AC_TAG_TEST_ABGEGEBEN }}
         run: python3 src/process_submission.py

@@ -23,6 +23,11 @@ Erforderliche Environment Variables:
   NETLIFY_SITE_ID       → die Netlify-Site-ID (steht im Netlify-Dashboard → Site Settings → General)
   NETLIFY_AUTH_TOKEN    → Personal Access Token aus app.netlify.com/user/applications
   SMTP_HOST, SMTP_USER, SMTP_PASSWORD, SMTP_PORT, SMTP_USE_SSL  → für Mail-Versand
+
+Optionale Environment Variables (für ActiveCampaign-Bridge-Sequenz):
+  AC_API_URL            → z. B. https://yourbalance.api-us1.com
+  AC_API_KEY            → API-Token aus AC → Einstellungen → Entwickler
+  AC_TAG_TEST_ABGEGEBEN → numerische Tag-ID (Default: 164)
 """
 
 from __future__ import annotations
@@ -122,6 +127,96 @@ def _mark_processed_in_log(blob_key: str) -> None:
         f.write(blob_key + "\n")
 
 
+# ============================================================
+# ACTIVECAMPAIGN — Tag setzen nach erfolgreicher PDF-Auswertung
+# ============================================================
+# Triggert die 4-teilige Bridge-Sequenz "From Heartbreak To Her" in AC.
+# Wenn AC_API_URL oder AC_API_KEY fehlen, wird der Aufruf still übersprungen
+# (Pipeline läuft auch ohne ActiveCampaign weiter).
+
+def setze_ac_tag(email: str, tag_id: int | None = None) -> bool:
+    """Setzt den TEST_ABGEGEBEN-Tag in ActiveCampaign für die angegebene E-Mail.
+
+    Schritte:
+      1. Kontakt anlegen oder aktualisieren (contact/sync)
+      2. Tag dem Kontakt zuweisen (contactTags)
+
+    Returns True bei Erfolg, False bei Fehler oder fehlender Konfiguration.
+    Fehler werden geloggt, aber nicht weitergeworfen — Tag-Setzen ist optional.
+    """
+    api_url = os.environ.get("AC_API_URL")
+    api_key = os.environ.get("AC_API_KEY")
+    if not api_url or not api_key:
+        print("  ⚠ AC_API_URL/AC_API_KEY nicht gesetzt — AC-Tag wird übersprungen")
+        return False
+    if not email:
+        print("  ⚠ Keine E-Mail vorhanden — AC-Tag wird übersprungen")
+        return False
+
+    if tag_id is None:
+        tag_id = int(os.environ.get("AC_TAG_TEST_ABGEGEBEN", "164"))
+
+    api_url = api_url.rstrip("/")
+
+    # 1. Kontakt anlegen oder updaten
+    contact_payload = json.dumps({"contact": {"email": email}}).encode("utf-8")
+    req = urllib.request.Request(
+        f"{api_url}/api/3/contact/sync",
+        data=contact_payload,
+        headers={
+            "Api-Token": api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            contact_id = result.get("contact", {}).get("id")
+            if not contact_id:
+                print(f"  ⚠ AC contact/sync: keine contact_id zurückgegeben")
+                return False
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "ignore")
+        print(f"  ⚠ AC contact/sync HTTP {e.code}: {body[:200]}")
+        return False
+    except Exception as e:
+        print(f"  ⚠ AC contact/sync Fehler: {e}")
+        return False
+
+    # 2. Tag zuweisen
+    tag_payload = json.dumps({
+        "contactTag": {"contact": int(contact_id), "tag": int(tag_id)}
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{api_url}/api/3/contactTags",
+        data=tag_payload,
+        headers={
+            "Api-Token": api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()  # Body verwerfen — Status 201 reicht
+            print(f"  ✓ AC-Tag {tag_id} an {email} gesetzt (contact_id {contact_id})")
+            return True
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "ignore")
+        # 422 = Tag bereits gesetzt — kein Problem
+        if e.code == 422 and "already" in body.lower():
+            print(f"  ✓ AC-Tag {tag_id} war bereits an {email} gesetzt")
+            return True
+        print(f"  ⚠ AC contactTags HTTP {e.code}: {body[:200]}")
+        return False
+    except Exception as e:
+        print(f"  ⚠ AC contactTags Fehler: {e}")
+        return False
+
+
 def mark_processed(blob_key: str, submission: dict) -> None:
     """
     Markiert eine Submission als verarbeitet:
@@ -212,6 +307,15 @@ def process_one(submission: dict, blob_key: str | None = None, dry_run: bool = F
         return {"ok": False, "info": "Keine E-Mail-Adresse in der Submission"}
     mail_res = sende_auswertung_mail(email, name, pdf_path, dry_run=dry_run)
     print(f"    {mail_res}")
+
+    # 5b. AC-Tag setzen (Bridge-Sequenz "From Heartbreak To Her" triggern)
+    #     Nur bei erfolgreichem Mail-Versand und nicht im dry-run.
+    if not dry_run and mail_res.get("ok"):
+        try:
+            setze_ac_tag(email)
+        except Exception as e:
+            # AC-Fehler dürfen die Pipeline NICHT abbrechen — Auswertung ist raus.
+            print(f"  ⚠ AC-Tag-Setzen fehlgeschlagen (nicht kritisch): {e}")
 
     # 6. Status updaten
     if not dry_run and blob_key:
